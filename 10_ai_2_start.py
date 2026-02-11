@@ -1,183 +1,65 @@
-from openai import OpenAI
 import json
 import os
-from dotenv import load_dotenv
-from datetime import datetime
 import time
+from typing import List
+from dotenv import load_dotenv
+from openai import OpenAI
+from pydantic import BaseModel, Field
+from src.core.utils import safe_load_json, safe_save_json
 
 load_dotenv()
-OPEN_AI_API = os.getenv("OPEN_AI_API")
+client = OpenAI(api_key=os.getenv("OPEN_AI_API"))
 
-client = OpenAI(api_key=OPEN_AI_API)
+class StartTimeNoteAnalysis(BaseModel):
+    note_index: int
+    start_severity: str = Field(..., pattern="^(Good|Flagged)$")
+    start_reason: str
 
+class StartTimeAnalysisResponse(BaseModel):
+    time_analysis: List[StartTimeNoteAnalysis]
 
-def analyze_issue(description):
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-2024-11-20",  # Updated to the latest available model
-            messages=[{"role": "user", "content": f"{description}"}],
-            functions=[
-                {
-                    "name": "issue_analysis",
-                    "description": "Analyze severity and reason for each note based on Session Creation Time and Start Time.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "time_analysis": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "note_index": {"type": "integer"},
-                                        "start_severity": {
-                                            "type": "string",
-                                            "enum": ["Good", "Flagged"],
-                                        },
-                                        "start_reason": {"type": "string"},
-                                    },
-                                    "required": [
-                                        "note_index",
-                                        "start_severity",
-                                        "start_reason",
-                                        
-                                    ],
-                                },
-                            },
-                        },
-                        "required": ["time_analysis"],
-                    },
-                }
-            ],
-            function_call={"name": "issue_analysis"},
-        )
+def analyze_start_time(data: dict) -> StartTimeAnalysisResponse:
+    prompt = f"""
+    Evaluate accuracy of employee added times.
+    Check Sequence: Session Creation Time vs Start Time.
+    If Session Creation Time is before Start Time within 20 mins, mark 'Good'.
+    Otherwise 'Flagged'. 
+    Use 12H format in reasons.
+    
+    Session Notes: {json.dumps(data.get('notes', []), indent=2)}
+    """
 
-        # Parse and validate the response
-        if not response.choices or not response.choices[0].message.function_call:
-            raise ValueError("Invalid response format from OpenAI API")
+    completion = client.beta.chat.completions.parse(
+        model="gpt-4o-2024-08-06",
+        messages=[
+            {"role": "system", "content": "You are an Employee Time Checker."},
+            {"role": "user", "content": prompt}
+        ],
+        response_format=StartTimeAnalysisResponse,
+    )
+    return completion.choices[0].message.parsed
 
-        result = json.loads(response.choices[0].message.function_call.arguments)
-
-        # Validate the result structure
-        if "time_analysis" not in result:
-            raise ValueError("Missing time_analysis in API response")
-
-        for note in result["time_analysis"]:
-            required_fields = [
-                "note_index",
-                "start_severity",
-                "start_reason",
-            ]
-            missing_fields = [field for field in required_fields if field not in note]
-            if missing_fields:
-                raise ValueError(f"Missing required fields in note: {missing_fields}")
-
-        return result
-
-    except Exception as e:
-        print(f"Error in analyze_issue: {str(e)}")
-        # Return a default structure in case of error
-        return {"time_analysis": []}
-
-
-def process_files(input_folder, output_folder):
-    # Create the output folder if it doesn't exist
-    os.makedirs(output_folder, exist_ok=True)
-
-    # Get list of all JSON files in the input folder
-    json_files = [f for f in os.listdir(input_folder) if f.endswith(".json")]
-
-    for filename in json_files:
-        try:
-            file_path = os.path.join(input_folder, filename)
-            output_file_path = os.path.join(output_folder, filename)
-
-            # Load data from the JSON file
-            with open(file_path, "r") as f:
-                data = json.load(f)
-
-            # Prepare the description
-            description = f"""
-            You are an **Employee Time Checker**. Your task is to evaluate the accuracy of employee added times based on the following sequence for each note:
-            - First **Session Creation Time** and then **Start Time**. Make sure that this sequence is followed, if not then output the note as **Flagged**. If the Session Creation Time is before the Start Time within 20 minutes, then output the note as **Good**. If the Session Creation Time is 20 minutes or more before the Start Time, then output the note as **Flagged**.
-
-            For each note in the **Session Notes**, you need to:
-            1. Assign an Index to each note, starting from zero.
-            1. Assign a severity (Good or Flagged) for each note.
-            2. Provide a clear and detailed reason for your assessment based on the following criteria:
-
-            ### 1. **Session Creation Time vs. Start Time**:
-            - If the **Session Creation Time** is before the **Start Time** within 20 minutes, mark it as **Good**.
-            - If the **Session Creation Time** is after the **Start Time**, mark it as **Flagged**.
-            - If Start Time is not provided, mark the note as **Flagged**.
-            - Always use 12 Hour Time Format should be (e.g., 01:30 AM/PM).
-            - Always provide the time difference between **Session Creation Time** and **Start Time** in the reason. The difference should be in format of **HH:MM**.
-
-            ### Example Reasons:
-            - **Good Reason**: The Session Creation Time was 13 minutes earlier than the Start Time. The Session Creation Time was 11:13 AM, and the Start Time was 11:26 AM. Therefore, the note is marked as Good due to the correct time entry.
-            - **Flagged Reason**: The Session Creation Time was 3 hours and 31 minutes earlier than the Start Time. The Session Creation Time was 09:06 AM, and the Start Time was 12:37 AM. Therefore, the note is marked as Flagged due to the correct time entry. The Session Creation Time should be before the Start Time within 20 minutes.
-            - **Flagged Reason**: The Session Creation Time was an hours after the Start Time. The Session Creation Time was 10:01 AM, and the Start Time was 9:01 AM. Because the Session Creation Time was after the Start Time, the note is marked as Flagged. The Session Creation Time should be before the Start Time within 20 minutes.
-            - **Flagged Reason**: The Session Creation Time was 4 minutes after the Start Time. The Session Creation Time was 10:02 AM, and the Start Time was 09:58 AM. Hence, the note is marked as Flagged due to the significant discrepancy. 
-
-            Use the 12-hour time format (e.g., 10:02 AM, 12:00 PM) in your responses.
-            Make sure you provide the correct severity and reason for each note and give each its index in the sequence(starting from zero).
-
-            ### Value Map:
-            - **Session Creation Time** = "session_creation_time"
-            - **Start Time** = "start_time"
-
-            **Session Notes**: {data['notes']}
-
-
-            Steps to follow:
-            1. Assign an Index to each note, starting from zero.
-            2. Calculate the time difference between **Session Creation Time** and **Start Time** in minutes.
-            3. If the Session Creation Time is before the Start Time within 20 minutes, then output the note as **Good**.
-            4. If the Session Creation Time is 20 minutes or more before the Start Time, then output the note as **Flagged**.
-            5. If the Start Time is not provided, mark the note as **Flagged**.
-            6. If the Session Creation Time is after the Start Time, mark the note as **Flagged**.
-            7. Output a clear and consice reason for the severity marked and use the example reasons to understand how to write the reason.
-
-            Make sure the structure of the response is as follows in this example:
-            "notes_analysis": [
-                {{
-                    "note_index": 0,
-                    "severity": "Good",
-                    "reason": "The Session Creation Time was 13 minutes earlier than the Start Time. The Session Creation Time was 11:13 AM, and the Start Time was 11:26 AM. Therefore, the note is marked as Good due to the correct time entry."
-                }}
-            ]
-            """
-
-            # Perform analysis
-            analysis = analyze_issue(description)
-
-            if not analysis["time_analysis"]:
-                print(f"Warning: No analysis results for {filename}")
-                continue
-
-            # Update the data with analysis results
-            for note_analysis in analysis["time_analysis"]:
-                note_index = note_analysis["note_index"]
-                if note_index < len(data["notes"]):
-                    for field in [
-                        "start_severity",
-                        "start_reason",
-                    ]:
-                        if field in note_analysis:
-                            data["notes"][note_index][field] = note_analysis[field]
-
-            # Save the updated data to a new JSON file
-            with open(output_file_path, "w") as f:
-                json.dump(data, f, indent=2)
-
-            print(f"Successfully processed {filename}")
-            time.sleep(2)  # Add a delay to avoid rate limiting
-
-        except Exception as e:
-            print(f"Error processing {filename}: {str(e)}")
-            continue
-
-
-if __name__ == "__main__":
+def main():
     input_folder = "AI Revised 1"
     output_folder = "AI Revised 2"
-    process_files(input_folder, output_folder)
+    os.makedirs(output_folder, exist_ok=True)
+
+    for filename in os.listdir(input_folder):
+        if not filename.endswith(".json"):
+            continue
+            
+        data = safe_load_json(os.path.join(input_folder, filename))
+        print(f"Analyzing start times for {filename}...")
+        results = analyze_start_time(data)
+        
+        for analysis in results.time_analysis:
+            idx = analysis.note_index
+            if idx < len(data["notes"]):
+                data["notes"][idx]["start_severity"] = analysis.start_severity
+                data["notes"][idx]["start_reason"] = analysis.start_reason
+
+        safe_save_json(data, os.path.join(output_folder, filename))
+        time.sleep(1)
+
+if __name__ == "__main__":
+    main()
