@@ -24,30 +24,7 @@ A high-performance, AI-powered integration pipeline that synchronizes phone call
 
 ![Workflow Diagram](./assets/diagram.PNG)
 
-### Pipeline Logic Flow
-```mermaid
-graph TD
-    subgraph "🌐 External Ecosystem"
-        M[Monday.com]
-        OP[OpenPhone]
-    end
 
-    subgraph "🚀 v2.0 Pipeline (src/pipeline)"
-        C[Collectors]
-        CL[Cleaners]
-        A[AI Analyzers]
-        R[Reporters]
-    end
-
-    M -- "Fetch Notes" --> C
-    OP -- "Fetch Transcripts" --> C
-    C -- "Raw Data" --> CL
-    CL -- "Structured JSON" --> A
-    A -- "Audit Results" --> R
-    R -- "Upload QA Flags" --> M
-```
-
----
 
 ## 📁 Folder Structure
 
